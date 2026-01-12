@@ -1,0 +1,549 @@
+# Offset pushdown scaffolding and initial test
+
+statement ok
+set datafusion.explain.logical_plan_only = false;
+
+# Use a single partition for deterministic file ordering in these tests
+statement ok
+set datafusion.execution.target_partitions = 1;
+
+# Base data used to materialize parquet files for offset tests
+statement ok
+CREATE TABLE offset_src (
+    id INT,
+    part_key INT,
+    value INT
+) AS VALUES
+    (1, 1, 10),
+    (2, 1, 11),
+    (3, 1, 12),
+    (4, 1, 13),
+    (5, 1, 14),
+    (6, 2, 15),
+    (7, 2, 16),
+    (8, 2, 17),
+    (9, 3, 18),
+    (10, 3, 19),
+    (11, 3, 20),
+    (12, 3, 21);
+
+# ----------------------------------------------------------------------
+# Step 1: materialize parquet files needed for the upcoming offset tests
+# ----------------------------------------------------------------------
+
+# Single-file dataset (exact row count, no predicate)
+query I
+COPY (SELECT * FROM offset_src ORDER BY id)
+TO 'test_files/scratch/offset/single/part-0.parquet'
+STORED AS PARQUET;
+----
+12
+
+statement ok
+CREATE EXTERNAL TABLE offset_single
+(
+  id INT,
+  part_key INT,
+  value INT
+)
+STORED AS PARQUET
+LOCATION 'test_files/scratch/offset/single/';
+
+# Multi-file dataset (exact row counts, split by part_key)
+# File 1 (part_key = 1)
+query I
+COPY (SELECT * FROM offset_src WHERE part_key = 1 ORDER BY id)
+TO 'test_files/scratch/offset/multi_exact/part-0.parquet'
+STORED AS PARQUET;
+----
+5
+
+# File 2 (part_key = 2)
+query I
+COPY (SELECT * FROM offset_src WHERE part_key = 2 ORDER BY id)
+TO 'test_files/scratch/offset/multi_exact/part-1.parquet'
+STORED AS PARQUET;
+----
+3
+
+# File 3 (part_key = 3)
+query I
+COPY (SELECT * FROM offset_src WHERE part_key = 3 ORDER BY id)
+TO 'test_files/scratch/offset/multi_exact/part-2.parquet'
+STORED AS PARQUET;
+----
+4
+
+statement ok
+CREATE EXTERNAL TABLE offset_multi_exact
+(
+  id INT,
+  part_key INT,
+  value INT
+)
+STORED AS PARQUET
+LOCATION 'test_files/scratch/offset/multi_exact/';
+
+# ----------------------------------------------------------------------
+# Step 2: Test 1 — Single file, single partition, exact rows, no predicate
+# Expect to skip first 3 rows and return the next 2 in order.
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_single
+ORDER BY id
+LIMIT 2 OFFSET 3;
+----
+4 13
+5 14
+
+# ----------------------------------------------------------------------
+# Test 2 — Single file, single partition, exact rows, predicate present
+# Predicate filters to part_key = 1 (rows id 1-5); offset and limit apply after filter.
+# Expect same rows as test 1.
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_single
+WHERE part_key = 1
+ORDER BY id
+LIMIT 2 OFFSET 3;
+----
+4 13
+5 14
+
+# ----------------------------------------------------------------------
+# Test 3 — Multiple files, single partition, exact rows, no predicate
+# Dataset spans three files; verify cross-file offset consumption.
+# Skip first 6 rows (id 1-6) and take next 3.
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_exact
+ORDER BY id
+LIMIT 3 OFFSET 6;
+----
+7 16
+8 17
+9 18
+
+# ----------------------------------------------------------------------
+# Test 4 — Multiple files, single partition, exact rows, predicate present
+# Predicate restricts to part_key = 3 (ids 9-12); apply offset within that subset.
+# Skip first 1 row and take next 2.
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_exact
+WHERE part_key = 3
+ORDER BY id
+LIMIT 2 OFFSET 1;
+----
+10 19
+11 20
+
+# ----------------------------------------------------------------------
+# Additional datasets for inexact-row-count scenarios (CSV, stats absent)
+# ----------------------------------------------------------------------
+
+# Single-file CSV (inexact stats)
+query I
+COPY (SELECT * FROM offset_src ORDER BY id)
+TO 'test_files/scratch/offset/single_csv/part-0.csv'
+STORED AS CSV;
+----
+12
+
+statement ok
+CREATE EXTERNAL TABLE offset_single_inexact
+(
+  id INT,
+  part_key INT,
+  value INT
+)
+STORED AS CSV
+LOCATION 'test_files/scratch/offset/single_csv/';
+
+# Multi-file CSV (inexact stats), split by part_key
+query I
+COPY (SELECT * FROM offset_src WHERE part_key = 1 ORDER BY id)
+TO 'test_files/scratch/offset/multi_inexact/part-0.csv'
+STORED AS CSV;
+----
+5
+
+query I
+COPY (SELECT * FROM offset_src WHERE part_key = 2 ORDER BY id)
+TO 'test_files/scratch/offset/multi_inexact/part-1.csv'
+STORED AS CSV;
+----
+3
+
+query I
+COPY (SELECT * FROM offset_src WHERE part_key = 3 ORDER BY id)
+TO 'test_files/scratch/offset/multi_inexact/part-2.csv'
+STORED AS CSV;
+----
+4
+
+statement ok
+CREATE EXTERNAL TABLE offset_multi_inexact
+(
+  id INT,
+  part_key INT,
+  value INT
+)
+STORED AS CSV
+LOCATION 'test_files/scratch/offset/multi_inexact/';
+
+# ----------------------------------------------------------------------
+# Test 5 — Single file, single partition, inexact rows, no predicate
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_single_inexact
+ORDER BY id
+LIMIT 2 OFFSET 3;
+----
+4 13
+5 14
+
+# ----------------------------------------------------------------------
+# Test 6 — Single file, single partition, inexact rows, predicate present
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_single_inexact
+WHERE part_key = 1
+ORDER BY id
+LIMIT 2 OFFSET 3;
+----
+4 13
+5 14
+
+# ----------------------------------------------------------------------
+# Test 7 — Multiple files, single partition, inexact rows, no predicate
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_inexact
+ORDER BY id
+LIMIT 3 OFFSET 6;
+----
+7 16
+8 17
+9 18
+
+# ----------------------------------------------------------------------
+# Test 8 — Multiple files, single partition, inexact rows, predicate present
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_inexact
+WHERE part_key = 3
+ORDER BY id
+LIMIT 2 OFFSET 1;
+----
+10 19
+11 20
+
+# ----------------------------------------------------------------------
+# Multi-partition scenarios: set target_partitions = 3
+# ----------------------------------------------------------------------
+statement ok
+set datafusion.execution.target_partitions = 3;
+
+# ----------------------------------------------------------------------
+# Test 9 — Single file, multiple partitions (config), exact rows, no predicate
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_single
+ORDER BY id
+LIMIT 2 OFFSET 3;
+----
+4 13
+5 14
+
+# ----------------------------------------------------------------------
+# Test 10 — Single file, multiple partitions (config), exact rows, predicate present
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_single
+WHERE part_key = 1
+ORDER BY id
+LIMIT 2 OFFSET 3;
+----
+4 13
+5 14
+
+# ----------------------------------------------------------------------
+# Test 11 — Single file, multiple partitions (config), inexact rows, no predicate
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_single_inexact
+ORDER BY id
+LIMIT 2 OFFSET 3;
+----
+4 13
+5 14
+
+# ----------------------------------------------------------------------
+# Test 12 — Single file, multiple partitions (config), inexact rows, predicate present
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_single_inexact
+WHERE part_key = 1
+ORDER BY id
+LIMIT 2 OFFSET 3;
+----
+4 13
+5 14
+
+# ----------------------------------------------------------------------
+# Test 13 — Multiple files, multiple partitions, exact rows, no predicate
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_exact
+ORDER BY id
+LIMIT 3 OFFSET 6;
+----
+7 16
+8 17
+9 18
+
+# ----------------------------------------------------------------------
+# Test 14 — Multiple files, multiple partitions, exact rows, predicate present
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_exact
+WHERE part_key = 3
+ORDER BY id
+LIMIT 2 OFFSET 1;
+----
+10 19
+11 20
+
+# ----------------------------------------------------------------------
+# Test 15 — Multiple files, multiple partitions, inexact rows, no predicate
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_inexact
+ORDER BY id
+LIMIT 3 OFFSET 6;
+----
+7 16
+8 17
+9 18
+
+# ----------------------------------------------------------------------
+# Test 16 — Multiple files, multiple partitions, inexact rows, predicate present
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_inexact
+WHERE part_key = 3
+ORDER BY id
+LIMIT 2 OFFSET 1;
+----
+10 19
+11 20
+
+# ----------------------------------------------------------------------
+# Additional multi-file exact scenarios: whole-file skips and empty files
+# ----------------------------------------------------------------------
+# Additional multi-file exact scenarios: whole-file skips and empty files
+# Files with an empty first file, followed by the same splits as offset_multi_exact
+query I
+COPY (SELECT * FROM offset_src WHERE 1 = 0)
+TO 'test_files/scratch/offset/multi_exact_empty/part-0.parquet'
+STORED AS PARQUET;
+----
+0
+
+query I
+COPY (SELECT * FROM offset_src WHERE part_key = 1 ORDER BY id)
+TO 'test_files/scratch/offset/multi_exact_empty/part-1.parquet'
+STORED AS PARQUET;
+----
+5
+
+query I
+COPY (SELECT * FROM offset_src WHERE part_key = 2 ORDER BY id)
+TO 'test_files/scratch/offset/multi_exact_empty/part-2.parquet'
+STORED AS PARQUET;
+----
+3
+
+query I
+COPY (SELECT * FROM offset_src WHERE part_key = 3 ORDER BY id)
+TO 'test_files/scratch/offset/multi_exact_empty/part-3.parquet'
+STORED AS PARQUET;
+----
+4
+
+statement ok
+CREATE EXTERNAL TABLE offset_multi_exact_empty
+(
+  id INT,
+  part_key INT,
+  value INT
+)
+STORED AS PARQUET
+LOCATION 'test_files/scratch/offset/multi_exact_empty/';
+
+# ----------------------------------------------------------------------
+# Test 17 — Multiple files, single partition, exact rows, no predicate
+# Offset spans exactly one whole file (skip 5 rows), then take 2.
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_exact
+ORDER BY id
+LIMIT 2 OFFSET 5;
+----
+6 15
+7 16
+
+# ----------------------------------------------------------------------
+# Test 18 — Multiple files, single partition, exact rows, no predicate
+# Offset spans two whole files (skip 8 rows), then take 2.
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_exact
+ORDER BY id
+LIMIT 2 OFFSET 8;
+----
+9 18
+10 19
+
+# ----------------------------------------------------------------------
+# Test 19 — Multiple files, single partition, exact rows, empty leading file
+# Offset across empty leading file (skip 2, take 2).
+# ----------------------------------------------------------------------
+query II
+SELECT id, value
+FROM offset_multi_exact_empty
+ORDER BY id
+LIMIT 2 OFFSET 2;
+----
+3 12
+4 13
+
+# ----------------------------------------------------------------------
+# Multi-row-group single-file scenarios (Parquet with small row groups)
+# ----------------------------------------------------------------------
+
+# Force small row groups while writing
+statement ok
+set datafusion.execution.parquet.max_row_group_size = 2;
+
+# Create a Parquet file with multiple row groups in a single file
+query I
+COPY (SELECT * FROM offset_src ORDER BY id)
+TO 'test_files/scratch/offset/single_multi_rg/part-0.parquet'
+STORED AS PARQUET;
+----
+12
+
+statement ok
+CREATE EXTERNAL TABLE offset_single_multi_rg
+(
+  id INT,
+  part_key INT,
+  value INT
+)
+STORED AS PARQUET
+LOCATION 'test_files/scratch/offset/single_multi_rg/';
+
+# Reset row group size to default for subsequent operations
+statement ok
+set datafusion.execution.parquet.max_row_group_size = 1048576;
+
+# Test 20 — Single file, multiple row groups, offset spans row-group boundary
+# Skip first 3 rows (crossing RG boundary when RG size is 2) and take next 3.
+query II
+SELECT id, value
+FROM offset_single_multi_rg
+ORDER BY id
+LIMIT 3 OFFSET 3;
+----
+4 13
+5 14
+6 15
+
+# ----------------------------------------------------------------------
+# Logical plan checks (no predicate)
+# ----------------------------------------------------------------------
+
+statement ok
+set datafusion.explain.logical_plan_only = false;
+
+# Logical plan: single file, exact rows, no predicate
+query TT
+EXPLAIN select id, value from offset_single order by id limit 2 offset 3;
+----
+logical_plan
+01)Limit: skip=3, fetch=2
+02)--Sort: offset_single.id ASC NULLS LAST, fetch=5
+03)----TableScan: offset_single projection=[id, value]
+physical_plan
+01)GlobalLimitExec: skip=3, fetch=2
+02)--DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/single/part-0.parquet]]}, projection=[id, value], limit=5, output_ordering=[id@0 ASC NULLS LAST], file_type=parquet
+
+# Logical plan: multi file, exact rows, no predicate
+query TT
+EXPLAIN select id, value from offset_multi_exact order by id limit 3 offset 6;
+----
+logical_plan
+01)Limit: skip=6, fetch=3
+02)--Sort: offset_multi_exact.id ASC NULLS LAST, fetch=9
+03)----TableScan: offset_multi_exact projection=[id, value]
+physical_plan
+01)GlobalLimitExec: skip=6, fetch=3
+02)--DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/multi_exact/part-0.parquet, WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/multi_exact/part-1.parquet, WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/multi_exact/part-2.parquet]]}, projection=[id, value], limit=9, output_ordering=[id@0 ASC NULLS LAST], file_type=parquet
+
+# Logical/physical plan: large offset on single Parquet file (table scan)
+query TT
+EXPLAIN select * from offset_single LIMIT 1 OFFSET 50000000;
+----
+logical_plan
+01)Limit: skip=50000000, fetch=1
+02)--TableScan: offset_single projection=[id, part_key, value], fetch=50000001
+physical_plan
+01)GlobalLimitExec: skip=50000000, fetch=1
+02)--DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/single/part-0.parquet]]}, projection=[id, part_key, value], limit=50000001, output_ordering=[id@0 ASC NULLS LAST], file_type=parquet
+
+# ----------------------------------------------------------------------
+# Teardown: reset configs and drop created tables
+# ----------------------------------------------------------------------
+statement ok
+set datafusion.execution.target_partitions = 1;
+
+statement ok
+DROP TABLE IF EXISTS offset_single_multi_rg;
+
+statement ok
+DROP TABLE IF EXISTS offset_multi_exact_empty;
+
+statement ok
+DROP TABLE IF EXISTS offset_multi_inexact;
+
+statement ok
+DROP TABLE IF EXISTS offset_multi_exact;
+
+statement ok
+DROP TABLE IF EXISTS offset_single_inexact;
+
+statement ok
+DROP TABLE IF EXISTS offset_single;
+
+statement ok
+DROP TABLE IF EXISTS offset_src;
