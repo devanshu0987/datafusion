@@ -494,9 +494,7 @@ logical_plan
 01)Limit: skip=3, fetch=2
 02)--Sort: offset_single.id ASC NULLS LAST, fetch=5
 03)----TableScan: offset_single projection=[id, value]
-physical_plan
-01)GlobalLimitExec: skip=3, fetch=2
-02)--DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/single/part-0.parquet]]}, projection=[id, value], limit=5, output_ordering=[id@0 ASC NULLS LAST], file_type=parquet
+physical_plan DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/single/part-0.parquet]]}, projection=[id, value], limit=5, skip=3, output_ordering=[id@0 ASC NULLS LAST], file_type=parquet
 
 # Logical plan: multi file, exact rows, no predicate
 query TT
@@ -506,9 +504,7 @@ logical_plan
 01)Limit: skip=6, fetch=3
 02)--Sort: offset_multi_exact.id ASC NULLS LAST, fetch=9
 03)----TableScan: offset_multi_exact projection=[id, value]
-physical_plan
-01)GlobalLimitExec: skip=6, fetch=3
-02)--DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/multi_exact/part-0.parquet, WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/multi_exact/part-1.parquet, WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/multi_exact/part-2.parquet]]}, projection=[id, value], limit=9, output_ordering=[id@0 ASC NULLS LAST], file_type=parquet
+physical_plan DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/multi_exact/part-0.parquet, WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/multi_exact/part-1.parquet, WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/multi_exact/part-2.parquet]]}, projection=[id, value], limit=9, skip=6, output_ordering=[id@0 ASC NULLS LAST], file_type=parquet
 
 # Logical/physical plan: large offset on single Parquet file (table scan)
 query TT
@@ -517,9 +513,7 @@ EXPLAIN select * from offset_single LIMIT 1 OFFSET 50000000;
 logical_plan
 01)Limit: skip=50000000, fetch=1
 02)--TableScan: offset_single projection=[id, part_key, value], fetch=50000001
-physical_plan
-01)GlobalLimitExec: skip=50000000, fetch=1
-02)--DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/single/part-0.parquet]]}, projection=[id, part_key, value], limit=50000001, output_ordering=[id@0 ASC NULLS LAST], file_type=parquet
+physical_plan DataSourceExec: file_groups={1 group: [[WORKSPACE_ROOT/datafusion/sqllogictest/test_files/scratch/offset/single/part-0.parquet]]}, projection=[id, part_key, value], limit=50000001, skip=50000000, output_ordering=[id@0 ASC NULLS LAST], file_type=parquet
 
 # ----------------------------------------------------------------------
 # Teardown: reset configs and drop created tables

@@ -516,9 +516,29 @@ pub trait ExecutionPlan: Debug + DisplayAs + Send + Sync {
         None
     }
 
+    /// Returns a variant of this `ExecutionPlan` node that applies `skip` and
+    /// `fetch` limits, if supported. Defaults to `with_fetch` when `skip` is
+    /// zero and returns `None` otherwise.
+    fn with_limit(
+        &self,
+        skip: usize,
+        fetch: Option<usize>,
+    ) -> Option<Arc<dyn ExecutionPlan>> {
+        if skip == 0 {
+            self.with_fetch(fetch)
+        } else {
+            None
+        }
+    }
+
     /// Gets the fetch count for the operator, `None` means there is no fetch.
     fn fetch(&self) -> Option<usize> {
         None
+    }
+
+    /// Gets the offset (skip) for the operator, defaults to zero.
+    fn skip(&self) -> usize {
+        0
     }
 
     /// Gets the effect on cardinality, if known

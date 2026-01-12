@@ -244,17 +244,11 @@ explain SELECT int_col FROM table1 LIMIT 3,2;
 ----
 physical_plan
 01)┌───────────────────────────┐
-02)│      GlobalLimitExec      │
+02)│       DataSourceExec      │
 03)│    --------------------   │
-04)│          limit: 2         │
-05)│          skip: 3          │
-06)└─────────────┬─────────────┘
-07)┌─────────────┴─────────────┐
-08)│       DataSourceExec      │
-09)│    --------------------   │
-10)│          files: 1         │
-11)│        format: csv        │
-12)└───────────────────────────┘
+04)│          files: 1         │
+05)│        format: csv        │
+06)└───────────────────────────┘
 
 query TT
 explain SELECT * FROM limit_table LIMIT 10;
