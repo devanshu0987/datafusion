@@ -761,20 +761,18 @@ impl DataSource for FileScanConfig {
         skip: usize,
         fetch: Option<usize>,
     ) -> Option<Arc<dyn DataSource>> {
+        // Do not push offset past scan-time filters; offset must apply after filtering.
         if skip > 0 && self.file_source.filter().is_some() {
+            return None;
+        }
+        // Preserve partitioning and avoid over-skipping: if multiple file groups
+        // exist, do not push skip down.
+        if skip > 0 && self.file_groups.len() > 1 {
             return None;
         }
         let mut builder = FileScanConfigBuilder::from(self.clone());
         let combined_skip = self.skip.saturating_add(skip);
         builder = builder.with_skip(combined_skip);
-
-        if skip > 0 && builder.file_groups.len() > 1 {
-            let mut files = Vec::new();
-            for group in builder.file_groups.drain(..) {
-                files.extend(group.into_inner());
-            }
-            builder.file_groups = vec![FileGroup::new(files)];
-        }
 
         let requested_limit =
             fetch.map(|requested| requested.saturating_add(combined_skip));
