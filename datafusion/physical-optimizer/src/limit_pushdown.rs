@@ -192,14 +192,28 @@ pub fn pushdown_limit_helper(
         };
     };
 
-    let skip_and_fetch = Some(global_fetch + global_state.skip);
-
     if pushdown_plan.supports_limit_pushdown() {
         if !combines_input_partitions(&pushdown_plan) {
-            // We have information in the global state and the plan pushes down,
-            // continue:
-            Ok((Transformed::no(pushdown_plan), global_state))
-        } else if let Some(plan_with_fetch) = pushdown_plan.with_fetch(skip_and_fetch) {
+            if let Some(plan_with_limit) =
+                pushdown_plan.with_limit(global_state.skip, global_state.fetch)
+            {
+                let mut new_state = global_state;
+                new_state.satisfied = true;
+                new_state.skip = 0;
+                new_state.fetch = plan_with_limit.fetch().or(new_state.fetch);
+                Ok((Transformed::yes(plan_with_limit), new_state))
+            } else {
+                // We have information in the global state and the plan pushes down,
+                // continue:
+                Ok((Transformed::no(pushdown_plan), global_state))
+            }
+        } else if let Some(plan_with_fetch) =
+            pushdown_plan.with_limit(global_state.skip, Some(global_fetch + global_state.skip))
+                .or_else(|| {
+                    let skip_and_fetch = Some(global_fetch + global_state.skip);
+                    pushdown_plan.with_fetch(skip_and_fetch)
+                })
+        {
             // This plan is combining input partitions, so we need to add the
             // fetch info to plan if possible. If not, we must add a `LimitExec`
             // with the information from the global state.
@@ -210,7 +224,7 @@ pub fn pushdown_limit_helper(
                 new_plan =
                     add_global_limit(new_plan, global_state.skip, global_state.fetch);
             }
-            global_state.fetch = skip_and_fetch;
+            global_state.fetch = Some(global_fetch + global_state.skip);
             global_state.skip = 0;
             global_state.satisfied = true;
             Ok((Transformed::yes(new_plan), global_state))
@@ -238,6 +252,7 @@ pub fn pushdown_limit_helper(
         global_state.fetch = None;
         global_state.skip = 0;
 
+        let skip_and_fetch = Some(global_fetch + global_skip);
         let maybe_fetchable = pushdown_plan.with_fetch(skip_and_fetch);
         if global_state.satisfied {
             if let Some(plan_with_fetch) = maybe_fetchable {

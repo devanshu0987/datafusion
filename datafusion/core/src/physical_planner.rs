@@ -1029,7 +1029,7 @@ impl DefaultPhysicalPlanner {
             LogicalPlan::Subquery(_) => todo!(),
             LogicalPlan::SubqueryAlias(_) => children.one()?,
             LogicalPlan::Limit(limit) => {
-                let input = children.one()?;
+                let mut input = children.one()?;
                 let SkipType::Literal(skip) = limit.get_skip_type()? else {
                     return not_impl_err!(
                         "Unsupported OFFSET expression: {:?}",

@@ -171,6 +171,23 @@ pub trait DataSource: Send + Sync + Debug {
     /// Return a copy of this DataSource with a new fetch limit
     fn with_fetch(&self, _limit: Option<usize>) -> Option<Arc<dyn DataSource>>;
     fn fetch(&self) -> Option<usize>;
+    /// Return a copy of this DataSource with offset and fetch limits, if supported.
+    /// Default implementation supports only fetch pushdown when skip is zero.
+    fn with_limit(
+        &self,
+        skip: usize,
+        fetch: Option<usize>,
+    ) -> Option<Arc<dyn DataSource>> {
+        if skip == 0 {
+            self.with_fetch(fetch)
+        } else {
+            None
+        }
+    }
+    /// Returns offset (skip) for this DataSource. Defaults to 0.
+    fn skip(&self) -> usize {
+        0
+    }
     fn metrics(&self) -> ExecutionPlanMetricsSet {
         ExecutionPlanMetricsSet::new()
     }
@@ -321,15 +338,40 @@ impl ExecutionPlan for DataSourceExec {
         self.data_source.partition_statistics(partition)
     }
 
-    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
-        let data_source = self.data_source.with_fetch(limit)?;
-        let cache = self.cache.clone();
+    fn supports_limit_pushdown(&self) -> bool {
+        // Memory-based sources (e.g. VALUES) do not currently support offset
+        // pushdown, so keep the explicit LimitExec for correctness.
+        if self
+            .data_source
+            .as_any()
+            .downcast_ref::<crate::memory::MemorySourceConfig>()
+            .is_some()
+        {
+            return false;
+        }
+        true
+    }
 
+    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        self.with_limit(self.data_source.skip(), limit)
+    }
+
+    fn with_limit(
+        &self,
+        skip: usize,
+        fetch: Option<usize>,
+    ) -> Option<Arc<dyn ExecutionPlan>> {
+        let data_source = self.data_source.with_limit(skip, fetch)?;
+        let cache = Self::compute_properties(&data_source);
         Some(Arc::new(Self { data_source, cache }))
     }
 
     fn fetch(&self) -> Option<usize> {
         self.data_source.fetch()
+    }
+
+    fn skip(&self) -> usize {
+        self.data_source.skip()
     }
 
     fn try_swapping_with_projection(

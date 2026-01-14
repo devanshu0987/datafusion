@@ -149,6 +149,8 @@ pub struct FileScanConfig {
     pub file_groups: Vec<FileGroup>,
     /// Table constraints
     pub constraints: Constraints,
+    /// The number of rows to skip (OFFSET) before producing output rows.
+    pub skip: usize,
     /// The maximum number of records to read from this plan. If `None`,
     /// all records after filtering are returned.
     pub limit: Option<usize>,
@@ -239,6 +241,7 @@ pub struct FileScanConfig {
 pub struct FileScanConfigBuilder {
     object_store_url: ObjectStoreUrl,
     file_source: Arc<dyn FileSource>,
+    skip: usize,
     limit: Option<usize>,
     constraints: Option<Constraints>,
     file_groups: Vec<FileGroup>,
@@ -268,6 +271,7 @@ impl FileScanConfigBuilder {
             statistics: None,
             output_ordering: vec![],
             file_compression_type: None,
+            skip: 0,
             limit: None,
             constraints: None,
             batch_size: None,
@@ -280,6 +284,12 @@ impl FileScanConfigBuilder {
     /// all records after filtering are returned.
     pub fn with_limit(mut self, limit: Option<usize>) -> Self {
         self.limit = limit;
+        self
+    }
+
+    /// Set the number of rows to skip (OFFSET) before producing output rows.
+    pub fn with_skip(mut self, skip: usize) -> Self {
+        self.skip = skip;
         self
     }
 
@@ -449,6 +459,7 @@ impl FileScanConfigBuilder {
         let Self {
             object_store_url,
             file_source,
+            skip,
             limit,
             constraints,
             file_groups,
@@ -470,6 +481,7 @@ impl FileScanConfigBuilder {
         FileScanConfig {
             object_store_url,
             file_source,
+            skip,
             limit,
             constraints,
             file_groups,
@@ -492,6 +504,7 @@ impl From<FileScanConfig> for FileScanConfigBuilder {
             statistics: Some(config.statistics),
             output_ordering: config.output_ordering,
             file_compression_type: Some(config.file_compression_type),
+            skip: config.skip,
             limit: config.limit,
             constraints: Some(config.constraints),
             batch_size: config.batch_size,
@@ -565,6 +578,9 @@ impl DataSource for FileScanConfig {
 
                 if let Some(limit) = self.limit {
                     write!(f, ", limit={limit}")?;
+                }
+                if self.skip > 0 {
+                    write!(f, ", skip={}", self.skip)?;
                 }
 
                 display_orderings(f, &orderings)?;
@@ -737,14 +753,47 @@ impl DataSource for FileScanConfig {
     }
 
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn DataSource>> {
-        let source = FileScanConfigBuilder::from(self.clone())
-            .with_limit(limit)
-            .build();
-        Some(Arc::new(source))
+        self.with_limit(0, limit)
+    }
+
+    fn with_limit(
+        &self,
+        skip: usize,
+        fetch: Option<usize>,
+    ) -> Option<Arc<dyn DataSource>> {
+        // Do not push offset past scan-time filters; offset must apply after filtering.
+        if skip > 0 && self.file_source.filter().is_some() {
+            return None;
+        }
+        // Preserve partitioning and avoid over-skipping: if multiple file groups
+        // exist, do not push skip down.
+        if skip > 0 && self.file_groups.len() > 1 {
+            return None;
+        }
+        let mut builder = FileScanConfigBuilder::from(self.clone());
+        let combined_skip = self.skip.saturating_add(skip);
+        builder = builder.with_skip(combined_skip);
+
+        let requested_limit =
+            fetch.map(|requested| requested.saturating_add(combined_skip));
+
+        let limit = match (self.limit, requested_limit) {
+            (Some(existing), Some(requested)) => Some(existing.min(requested)),
+            (Some(existing), None) => Some(existing),
+            (None, Some(requested)) => Some(requested),
+            (None, None) => None,
+        };
+
+        builder = builder.with_limit(limit);
+        Some(Arc::new(builder.build()))
     }
 
     fn fetch(&self) -> Option<usize> {
         self.limit
+    }
+
+    fn skip(&self) -> usize {
+        self.skip
     }
 
     fn metrics(&self) -> ExecutionPlanMetricsSet {

@@ -31,6 +31,7 @@ use crate::PartitionedFile;
 use crate::file_scan_config::FileScanConfig;
 use arrow::datatypes::SchemaRef;
 use datafusion_common::error::Result;
+use datafusion_common::stats::Precision;
 use datafusion_execution::RecordBatchStream;
 use datafusion_physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, Time,
@@ -50,6 +51,8 @@ pub struct FileStream {
     /// The stream schema (file schema including partition columns and after
     /// projection).
     projected_schema: SchemaRef,
+    /// Number of rows to skip before producing output rows.
+    skip: usize,
     /// The remaining number of records to parse, None if no limit
     remain: Option<usize>,
     /// A dynamic [`FileOpener`]. Calling `open()` returns a [`FileOpenFuture`],
@@ -76,11 +79,39 @@ impl FileStream {
         let projected_schema = config.projected_schema()?;
 
         let file_group = config.file_groups[partition].clone();
+        let mut skip_remaining = config.skip;
+        let mut file_iter: VecDeque<PartitionedFile> = VecDeque::new();
+
+        let mut files = file_group.into_inner().into_iter();
+        while let Some(file) = files.next() {
+            if skip_remaining == 0 {
+                file_iter.push_back(file);
+                continue;
+            }
+
+            if let Some(statistics) = file.statistics.as_deref()
+                && let Precision::Exact(num_rows) = statistics.num_rows
+            {
+                if num_rows <= skip_remaining {
+                    skip_remaining -= num_rows;
+                    continue;
+                }
+            }
+
+            file_iter.push_back(file);
+            file_iter.extend(files);
+            break;
+        }
+
+        let remain = config
+            .limit
+            .map(|limit| limit.saturating_sub(config.skip));
 
         Ok(Self {
-            file_iter: file_group.into_inner().into_iter().collect(),
+            file_iter,
             projected_schema,
-            remain: config.limit,
+            skip: skip_remaining,
+            remain,
             file_opener,
             state: FileStreamState::Idle,
             file_stream_metrics: FileStreamMetrics::new(metrics, partition),
@@ -172,6 +203,20 @@ impl FileStream {
                         Some(Ok(batch)) => {
                             self.file_stream_metrics.time_scanning_until_data.stop();
                             self.file_stream_metrics.time_scanning_total.stop();
+                            let mut batch = batch;
+                            if self.skip > 0 {
+                                if batch.num_rows() <= self.skip {
+                                    self.skip -= batch.num_rows();
+                                    continue;
+                                } else {
+                                    let to_skip = self.skip;
+                                    self.skip = 0;
+                                    batch = batch.slice(
+                                        to_skip,
+                                        batch.num_rows().saturating_sub(to_skip),
+                                    );
+                                }
+                            }
                             let batch = match &mut self.remain {
                                 Some(remain) => {
                                     if *remain > batch.num_rows() {
@@ -500,6 +545,8 @@ mod tests {
         num_files: usize,
         /// Global limit of records emitted by the stream
         limit: Option<usize>,
+        /// Number of rows to skip before emitting records
+        skip: usize,
         /// Error-handling behavior of the stream
         on_error: OnError,
         /// Mock `FileOpener`
@@ -520,6 +567,12 @@ mod tests {
         /// Specify the limit
         pub fn with_limit(mut self, limit: Option<usize>) -> Self {
             self.limit = limit;
+            self
+        }
+
+        /// Specify the skip (offset)
+        pub fn with_skip(mut self, skip: usize) -> Self {
+            self.skip = skip;
             self
         }
 
@@ -582,6 +635,7 @@ mod tests {
                 Arc::new(MockSource::new(table_schema)),
             )
             .with_file_group(file_group)
+            .with_skip(self.skip)
             .with_limit(self.limit)
             .build();
             let metrics_set = ExecutionPlanMetricsSet::new();
@@ -878,6 +932,30 @@ mod tests {
             "| 2 |",
             "| 0 |",
             "| 1 |",
+            "+---+",
+        ], &batches);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn with_skip_and_limit() -> Result<()> {
+        // Skip the first 6 rows across two files and return only the next 2 rows
+        let batches = FileStreamTest::new()
+            .with_records(vec![make_partition(3), make_partition(2)])
+            .with_num_files(2)
+            .with_skip(6)
+            .with_limit(Some(8))
+            .result()
+            .await?;
+
+        #[rustfmt::skip]
+        assert_batches_eq!(&[
+            "+---+",
+            "| i |",
+            "+---+",
+            "| 1 |",
+            "| 2 |",
             "+---+",
         ], &batches);
 
