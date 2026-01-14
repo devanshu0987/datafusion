@@ -883,6 +883,7 @@ impl LogicalPlan {
             LogicalPlan::Sort(Sort {
                 expr: sort_expr,
                 fetch,
+                skip,
                 ..
             }) => {
                 let input = self.only_input(inputs)?;
@@ -894,6 +895,7 @@ impl LogicalPlan {
                         .collect(),
                     input: Arc::new(input),
                     fetch: *fetch,
+                    skip: *skip,
                 }))
             }
             LogicalPlan::Join(Join {
@@ -1808,6 +1810,7 @@ impl LogicalPlan {
                         projection,
                         filters,
                         fetch,
+                        skip,
                         ..
                     }) => {
                         let projected_fields = match projection {
@@ -1871,6 +1874,10 @@ impl LogicalPlan {
                             }
                         }
 
+                        if let Some(n) = skip {
+                            write!(f, ", skip={n}")?;
+                        }
+
                         if let Some(n) = fetch {
                             write!(f, ", fetch={n}")?;
                         }
@@ -1932,7 +1939,9 @@ impl LogicalPlan {
                         expr_vec_fmt!(group_expr),
                         expr_vec_fmt!(aggr_expr)
                     ),
-                    LogicalPlan::Sort(Sort { expr, fetch, .. }) => {
+                    LogicalPlan::Sort(Sort {
+                        expr, fetch, skip, ..
+                    }) => {
                         write!(f, "Sort: ")?;
                         for (i, expr_item) in expr.iter().enumerate() {
                             if i > 0 {
@@ -1940,8 +1949,13 @@ impl LogicalPlan {
                             }
                             write!(f, "{expr_item}")?;
                         }
+
                         if let Some(a) = fetch {
                             write!(f, ", fetch={a}")?;
+                        }
+
+                        if let Some(s) = skip {
+                            write!(f, ", skip={s}")?;
                         }
 
                         Ok(())
@@ -2681,6 +2695,8 @@ pub struct TableScan {
     pub projected_schema: DFSchemaRef,
     /// Optional expressions to be used as filters by the table provider
     pub filters: Vec<Expr>,
+    /// Optional number of rows to skip before starting to read
+    pub skip: Option<usize>,
     /// Optional number of rows to read
     pub fetch: Option<usize>,
 }
@@ -2694,6 +2710,7 @@ impl Debug for TableScan {
             .field("projected_schema", &self.projected_schema)
             .field("filters", &self.filters)
             .field("fetch", &self.fetch)
+            .field("skip", &self.skip)
             .finish_non_exhaustive()
     }
 }
@@ -2705,6 +2722,7 @@ impl PartialEq for TableScan {
             && self.projected_schema == other.projected_schema
             && self.filters == other.filters
             && self.fetch == other.fetch
+            && self.skip == other.skip
     }
 }
 
@@ -2722,20 +2740,24 @@ impl PartialOrd for TableScan {
             pub projection: &'a Option<Vec<usize>>,
             /// Optional expressions to be used as filters by the table provider
             pub filters: &'a Vec<Expr>,
-            /// Optional number of rows to read
+            /// Optional number of rows to skip before starting to read
             pub fetch: &'a Option<usize>,
+            /// Optional number of rows to read
+            pub skip: &'a Option<usize>,
         }
         let comparable_self = ComparableTableScan {
             table_name: &self.table_name,
             projection: &self.projection,
             filters: &self.filters,
             fetch: &self.fetch,
+            skip: &self.skip,
         };
         let comparable_other = ComparableTableScan {
             table_name: &other.table_name,
             projection: &other.projection,
             filters: &other.filters,
             fetch: &other.fetch,
+            skip: &other.skip,
         };
         comparable_self
             .partial_cmp(&comparable_other)
@@ -2751,6 +2773,7 @@ impl Hash for TableScan {
         self.projected_schema.hash(state);
         self.filters.hash(state);
         self.fetch.hash(state);
+        self.skip.hash(state);
     }
 }
 
@@ -2763,6 +2786,7 @@ impl TableScan {
         projection: Option<Vec<usize>>,
         filters: Vec<Expr>,
         fetch: Option<usize>,
+        skip: Option<usize>,
     ) -> Result<Self> {
         let table_name = table_name.into();
 
@@ -2804,6 +2828,7 @@ impl TableScan {
             projected_schema,
             filters,
             fetch,
+            skip,
         })
     }
 }
@@ -3758,6 +3783,8 @@ pub struct Sort {
     pub expr: Vec<SortExpr>,
     /// The incoming logical plan
     pub input: Arc<LogicalPlan>,
+    /// Optional number of rows to skip before fetch
+    pub skip: Option<usize>,
     /// Optional fetch limit
     pub fetch: Option<usize>,
 }
@@ -4968,6 +4995,7 @@ mod tests {
             projected_schema: Arc::clone(&schema),
             filters: vec![],
             fetch: None,
+            skip: None,
         }));
         let col = schema.field_names()[0].clone();
 
@@ -4998,6 +5026,7 @@ mod tests {
             projected_schema: Arc::clone(&unique_schema),
             filters: vec![],
             fetch: None,
+            skip: None,
         }));
         let col = schema.field_names()[0].clone();
 

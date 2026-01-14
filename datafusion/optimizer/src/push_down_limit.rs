@@ -17,7 +17,7 @@
 
 //! [`PushDownLimit`] pushes `LIMIT` earlier in the query plan
 
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::sync::Arc;
 
 use crate::optimizer::ApplyOrder;
@@ -90,21 +90,28 @@ impl OptimizerRule for PushDownLimit {
             return Ok(Transformed::no(LogicalPlan::Limit(limit)));
         };
 
+        // TODO(feniljain): Change all the other LogicalPlan nodes
+        // to accept skip field and add tests cases for all of them
+        //
+        // impl/test:
+        // X/X tablescan
+        // X/- union
+        // X/- join
+        // X/- sort
+        // X/- projection
+        // X/- subquery
+        // X/- extension
         match Arc::unwrap_or_clone(limit.input) {
             LogicalPlan::TableScan(mut scan) => {
-                let rows_needed = if fetch != 0 { fetch + skip } else { 0 };
-                let new_fetch = scan
-                    .fetch
-                    .map(|x| min(x, rows_needed))
-                    .or(Some(rows_needed));
-                if new_fetch == scan.fetch {
+                let new_fetch = scan.fetch.map(|x| min(x, fetch)).or(Some(fetch));
+                let new_skip = scan.fetch.map(|x| max(x, skip)).or(Some(skip));
+
+                // push limit and offset into the table scan itself
+                if new_fetch == scan.fetch && new_skip == scan.skip {
                     original_limit(skip, fetch, LogicalPlan::TableScan(scan))
                 } else {
-                    // push limit into the table scan itself
-                    scan.fetch = scan
-                        .fetch
-                        .map(|x| min(x, rows_needed))
-                        .or(Some(rows_needed));
+                    scan.fetch = new_fetch;
+                    scan.skip = new_skip;
                     transformed_limit(skip, fetch, LogicalPlan::TableScan(scan))
                 }
             }
@@ -113,7 +120,7 @@ impl OptimizerRule for PushDownLimit {
                 union.inputs = union
                     .inputs
                     .into_iter()
-                    .map(|input| make_arc_limit(0, fetch + skip, input))
+                    .map(|input| make_arc_limit(skip, fetch, input))
                     .collect();
                 transformed_limit(skip, fetch, LogicalPlan::Union(union))
             }
@@ -124,20 +131,16 @@ impl OptimizerRule for PushDownLimit {
                 })),
 
             LogicalPlan::Sort(mut sort) => {
-                let new_fetch = {
-                    let sort_fetch = skip + fetch;
-                    Some(sort.fetch.map(|f| f.min(sort_fetch)).unwrap_or(sort_fetch))
-                };
-                if new_fetch == sort.fetch {
-                    if skip > 0 {
-                        original_limit(skip, fetch, LogicalPlan::Sort(sort))
-                    } else {
-                        Ok(Transformed::yes(LogicalPlan::Sort(sort)))
-                    }
+                let new_fetch = sort.fetch.map(|x| min(x, fetch)).or(Some(fetch));
+                let new_skip = sort.fetch.map(|x| max(x, skip)).or(Some(skip));
+
+                // push limit and offset into the table sort itself
+                if new_fetch == sort.fetch && new_skip == sort.skip {
+                    original_limit(skip, fetch, LogicalPlan::Sort(sort))
                 } else {
                     sort.fetch = new_fetch;
-                    limit.input = Arc::new(LogicalPlan::Sort(sort));
-                    Ok(Transformed::yes(LogicalPlan::Limit(limit)))
+                    sort.skip = new_skip;
+                    transformed_limit(skip, fetch, LogicalPlan::Sort(sort))
                 }
             }
             LogicalPlan::Projection(mut proj) => {
@@ -163,8 +166,8 @@ impl OptimizerRule for PushDownLimit {
                     .into_iter()
                     .map(|child| {
                         LogicalPlan::Limit(Limit {
-                            skip: None,
-                            fetch: Some(Box::new(lit((fetch + skip) as i64))),
+                            skip: Some(Box::new(lit((skip) as i64))),
+                            fetch: Some(Box::new(lit((fetch) as i64))),
                             input: Arc::new(child.clone()),
                         })
                     })
@@ -459,6 +462,23 @@ mod test {
           NoopPlan
             Limit: skip=0, fetch=1010
               TableScan: test, fetch=1010
+        "
+        )
+    }
+
+    #[test]
+    fn limit_and_skip_push_down_to_table_scan() -> Result<()> {
+        let table_scan = test_table_scan()?;
+
+        let plan = LogicalPlanBuilder::from(table_scan)
+            .limit(5, Some(1000))?
+            .build()?;
+
+        assert_optimized_plan_equal!(
+            plan,
+            @r"
+        Limit: skip=5, fetch=1000
+          TableScan: test, skip=5, fetch=1000
         "
         )
     }

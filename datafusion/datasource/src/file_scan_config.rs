@@ -152,6 +152,9 @@ pub struct FileScanConfig {
     /// The maximum number of records to read from this plan. If `None`,
     /// all records after filtering are returned.
     pub limit: Option<usize>,
+    /// Number of records to skip before starting to read `limit` rows. If `None,
+    /// records are read from the start.
+    pub offset: Option<usize>,
     /// All equivalent lexicographical orderings that describe the schema.
     pub output_ordering: Vec<LexOrdering>,
     /// File compression type
@@ -240,6 +243,7 @@ pub struct FileScanConfigBuilder {
     object_store_url: ObjectStoreUrl,
     file_source: Arc<dyn FileSource>,
     limit: Option<usize>,
+    offset: Option<usize>,
     constraints: Option<Constraints>,
     file_groups: Vec<FileGroup>,
     statistics: Option<Statistics>,
@@ -268,6 +272,7 @@ impl FileScanConfigBuilder {
             statistics: None,
             output_ordering: vec![],
             file_compression_type: None,
+            offset: None,
             limit: None,
             constraints: None,
             batch_size: None,
@@ -280,6 +285,13 @@ impl FileScanConfigBuilder {
     /// all records after filtering are returned.
     pub fn with_limit(mut self, limit: Option<usize>) -> Self {
         self.limit = limit;
+        self
+    }
+
+    /// Number of records to skip before starting to read `limit` rows. If `None,
+    /// records are read from the start.
+    pub fn with_offset(mut self, offset: Option<usize>) -> Self {
+        self.offset = offset;
         self
     }
 
@@ -449,6 +461,7 @@ impl FileScanConfigBuilder {
         let Self {
             object_store_url,
             file_source,
+            offset,
             limit,
             constraints,
             file_groups,
@@ -470,6 +483,7 @@ impl FileScanConfigBuilder {
         FileScanConfig {
             object_store_url,
             file_source,
+            offset,
             limit,
             constraints,
             file_groups,
@@ -493,6 +507,7 @@ impl From<FileScanConfig> for FileScanConfigBuilder {
             output_ordering: config.output_ordering,
             file_compression_type: Some(config.file_compression_type),
             limit: config.limit,
+            offset: config.offset,
             constraints: Some(config.constraints),
             batch_size: config.batch_size,
             expr_adapter_factory: config.expr_adapter_factory,
@@ -565,6 +580,10 @@ impl DataSource for FileScanConfig {
 
                 if let Some(limit) = self.limit {
                     write!(f, ", limit={limit}")?;
+                }
+
+                if let Some(offset) = self.offset {
+                    write!(f, ", offset={offset}")?;
                 }
 
                 display_orderings(f, &orderings)?;
@@ -745,6 +764,17 @@ impl DataSource for FileScanConfig {
 
     fn fetch(&self) -> Option<usize> {
         self.limit
+    }
+
+    fn with_offset(&self, offset: Option<usize>) -> Option<Arc<dyn DataSource>> {
+        let source = FileScanConfigBuilder::from(self.clone())
+            .with_offset(offset)
+            .build();
+        Some(Arc::new(source))
+    }
+
+    fn offset(&self) -> Option<usize> {
+        self.offset
     }
 
     fn metrics(&self) -> ExecutionPlanMetricsSet {
@@ -1175,6 +1205,10 @@ impl DisplayAs for FileScanConfig {
 
         if let Some(limit) = self.limit {
             write!(f, ", limit={limit}")?;
+        }
+
+        if let Some(offset) = self.offset {
+            write!(f, ", offset={offset}")?;
         }
 
         display_orderings(f, &orderings)?;
@@ -1746,6 +1780,7 @@ mod tests {
         // Build with various configurations
         let config = builder
             .with_limit(Some(1000))
+            .with_offset(Some(2000))
             .with_projection_indices(Some(vec![0, 1]))
             .unwrap()
             .with_statistics(Statistics::new_unknown(&file_schema))
@@ -1766,6 +1801,7 @@ mod tests {
         assert_eq!(config.object_store_url, object_store_url);
         assert_eq!(*config.file_schema(), file_schema);
         assert_eq!(config.limit, Some(1000));
+        assert_eq!(config.offset, Some(2000));
         assert_eq!(
             config
                 .file_source
@@ -1925,6 +1961,7 @@ mod tests {
         .with_projection_indices(Some(vec![0, 2]))
         .unwrap()
         .with_limit(Some(10))
+        .with_offset(Some(20))
         .with_file(file.clone())
         .with_constraints(Constraints::default())
         .build();
@@ -1948,6 +1985,7 @@ mod tests {
             Some(vec![0, 2])
         );
         assert_eq!(new_config.limit, Some(10));
+        assert_eq!(new_config.offset, Some(20));
         assert_eq!(*new_config.table_partition_cols(), partition_cols);
         assert_eq!(new_config.file_groups.len(), 1);
         assert_eq!(new_config.file_groups[0].len(), 1);

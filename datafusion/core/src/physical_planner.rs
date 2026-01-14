@@ -460,6 +460,7 @@ impl DefaultPhysicalPlanner {
                 projection,
                 filters,
                 fetch,
+                skip,
                 ..
             }) => {
                 let source = source_as_provider(source)?;
@@ -471,7 +472,8 @@ impl DefaultPhysicalPlanner {
                 let opts = ScanArgs::default()
                     .with_projection(projection.as_deref())
                     .with_filters(Some(&filters_vec))
-                    .with_limit(*fetch);
+                    .with_limit(*fetch)
+                    .with_offset(*skip);
                 let res = source.scan_with_args(session_state, opts).await?;
                 Arc::clone(res.plan())
             }
@@ -1011,6 +1013,7 @@ impl DefaultPhysicalPlanner {
             LogicalPlan::Sort(Sort {
                 expr, input, fetch, ..
             }) => {
+                // TODO(feniljain): pass skip here
                 let physical_input = children.one()?;
                 let input_dfschema = input.as_ref().schema();
                 let sort_exprs = create_physical_sort_exprs(
@@ -4166,6 +4169,7 @@ digraph {
             _projection: Option<&Vec<usize>>,
             _filters: &[Expr],
             _limit: Option<usize>,
+            _offset: Option<usize>,
         ) -> Result<Arc<dyn ExecutionPlan>> {
             Ok(Arc::new(NoOpExecutionPlan::new(Arc::clone(
                 &self.physical_schema,
